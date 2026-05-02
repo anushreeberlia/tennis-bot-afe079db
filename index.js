@@ -154,32 +154,46 @@ async function sendPushNotifications(courts) {
   const data = await readData();
   const { pushTokens } = data;
   
+  await addLog(`Checking push tokens... Found ${pushTokens.length} tokens`);
+  
   if (pushTokens.length === 0) {
-    await addLog('No push tokens registered for notifications');
+    await addLog('No push tokens registered for notifications', 'error');
     return;
   }
   
-  const messages = pushTokens
-    .filter(token => Expo.isExpoPushToken(token))
-    .map(token => ({
-      to: token,
-      sound: 'default',
-      title: '🎾 Tennis Courts Available!',
-      body: `${courts.length} Friday slots found at Joe DiMaggio`,
-      data: { courts }
-    }));
+  const validTokens = pushTokens.filter(token => {
+    const isValid = Expo.isExpoPushToken(token);
+    if (!isValid) {
+      addLog(`Invalid push token found: ${token.substring(0, 20)}...`, 'error');
+    }
+    return isValid;
+  });
   
-  if (messages.length === 0) {
-    await addLog('No valid push tokens to send notifications to');
+  await addLog(`Found ${validTokens.length} valid push tokens out of ${pushTokens.length} total`);
+  
+  if (validTokens.length === 0) {
+    await addLog('No valid push tokens to send notifications to', 'error');
     return;
   }
+  
+  const messages = validTokens.map(token => ({
+    to: token,
+    sound: 'default',
+    title: '🎾 Tennis Courts Available!',
+    body: `${courts.length} Friday slots found at Joe DiMaggio`,
+    data: { courts }
+  }));
   
   try {
+    await addLog(`Preparing to send ${messages.length} push notifications`);
     const chunks = expo.chunkPushNotifications(messages);
+    
     for (const chunk of chunks) {
       const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-      await addLog(`Sent ${chunk.length} push notifications`, 'success');
+      await addLog(`Sent push notification chunk of ${chunk.length} messages`, 'success', ticketChunk);
     }
+    
+    await addLog(`Successfully sent notifications to ${validTokens.length} devices`, 'success');
   } catch (error) {
     await addLog(`Error sending push notifications: ${error.message}`, 'error');
   }
@@ -224,19 +238,35 @@ app.get('/', (req, res) => {
 app.post('/register-push-token', async (req, res) => {
   try {
     const { token } = req.body;
-    if (!token || !Expo.isExpoPushToken(token)) {
-      return res.status(400).json({ error: 'Invalid push token' });
+    
+    await addLog(`Received push token registration request: ${token ? token.substring(0, 20) + '...' : 'NO TOKEN'}`);
+    
+    if (!token) {
+      await addLog('Push token registration failed: No token provided', 'error');
+      return res.status(400).json({ error: 'No push token provided' });
+    }
+    
+    if (!Expo.isExpoPushToken(token)) {
+      await addLog(`Push token registration failed: Invalid token format - ${token.substring(0, 20)}...`, 'error');
+      return res.status(400).json({ error: 'Invalid push token format' });
     }
     
     const data = await readData();
     if (!data.pushTokens.includes(token)) {
       data.pushTokens.push(token);
       await writeData(data);
-      await addLog(`Registered new push token: ${token.substring(0, 20)}...`);
+      await addLog(`Successfully registered new push token: ${token.substring(0, 20)}...`, 'success');
+    } else {
+      await addLog(`Push token already registered: ${token.substring(0, 20)}...`);
     }
     
-    res.json({ success: true, message: 'Push token registered' });
+    res.json({ 
+      success: true, 
+      message: 'Push token registered',
+      totalTokens: data.pushTokens.length
+    });
   } catch (error) {
+    await addLog(`Error registering push token: ${error.message}`, 'error');
     res.status(500).json({ error: error.message });
   }
 });
@@ -246,27 +276,37 @@ app.post('/test-notification', async (req, res) => {
     const data = await readData();
     const { pushTokens } = data;
     
+    await addLog(`Test notification requested. Found ${pushTokens.length} registered tokens`);
+    
     if (pushTokens.length === 0) {
+      await addLog('Test notification failed: No push tokens registered', 'error');
       return res.status(400).json({ error: 'No push tokens registered' });
     }
     
-    const messages = pushTokens
-      .filter(token => Expo.isExpoPushToken(token))
-      .map(token => ({
-        to: token,
-        sound: 'default',
-        title: '🎾 Test Notification',
-        body: 'Push notifications are working correctly!',
-        data: { test: true }
-      }));
+    const validTokens = pushTokens.filter(token => Expo.isExpoPushToken(token));
+    await addLog(`Found ${validTokens.length} valid tokens out of ${pushTokens.length} total`);
+    
+    if (validTokens.length === 0) {
+      await addLog('Test notification failed: No valid push tokens', 'error');
+      return res.status(400).json({ error: 'No valid push tokens found' });
+    }
+    
+    const messages = validTokens.map(token => ({
+      to: token,
+      sound: 'default',
+      title: '🎾 Test Notification',
+      body: 'Push notifications are working correctly!',
+      data: { test: true }
+    }));
     
     const chunks = expo.chunkPushNotifications(messages);
     for (const chunk of chunks) {
-      await expo.sendPushNotificationsAsync(chunk);
+      const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+      await addLog(`Test notification chunk sent`, 'success', ticketChunk);
     }
     
-    await addLog(`Sent test notifications to ${messages.length} devices`, 'success');
-    res.json({ success: true, message: `Test notification sent to ${messages.length} devices` });
+    await addLog(`Test notifications sent to ${validTokens.length} devices`, 'success');
+    res.json({ success: true, message: `Test notification sent to ${validTokens.length} devices` });
   } catch (error) {
     await addLog(`Error sending test notification: ${error.message}`, 'error');
     res.status(500).json({ error: error.message });
@@ -288,7 +328,9 @@ app.get('/status', async (req, res) => {
     res.json({
       botStatus: data.botStatus,
       registeredTokens: data.pushTokens.length,
-      availableCourts: data.lastAvailableCourts || []
+      validTokens: data.pushTokens.filter(token => Expo.isExpoPushToken(token)).length,
+      availableCourts: data.lastAvailableCourts || [],
+      pushTokens: data.pushTokens.map(token => token.substring(0, 20) + '...') // For debugging
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -300,6 +342,24 @@ app.post('/force-check', async (req, res) => {
     await addLog('Manual court check triggered');
     await runBot();
     res.json({ success: true, message: 'Court check completed' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/debug-tokens', async (req, res) => {
+  try {
+    const data = await readData();
+    const tokenDetails = data.pushTokens.map(token => ({
+      preview: token.substring(0, 30) + '...',
+      isValid: Expo.isExpoPushToken(token),
+      length: token.length
+    }));
+    
+    res.json({
+      totalTokens: data.pushTokens.length,
+      tokens: tokenDetails
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
